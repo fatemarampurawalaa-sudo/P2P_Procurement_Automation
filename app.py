@@ -301,7 +301,8 @@ def ai_extract(kind, text):
     from google import genai
     from google.genai import types
     schema = {"emails": list[PurchaseRequest], "quotes": list[Quote], "invoices": list[Invoice]}[kind]
-    client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+    client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"],
+                          http_options=types.HttpOptions(api_version="v1beta"))  # "-latest" model names live on v1beta
     prompt = ("You are a procurement assistant. Extract one row per document below. "
               "Calculate totals as quantity x unit price and convert weeks to days (1 week = 7 days).\n\n" + text)
     last_error = None
