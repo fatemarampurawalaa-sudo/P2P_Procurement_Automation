@@ -223,7 +223,7 @@ def step(state):
         elif stage == "Invoice":
             check_invoice(state, r)
 
-    for _ in range(random.choices([0, 1, 2], weights=[0.4, 0.45, 0.15])[0]):
+    for _ in range(random.choices([0, 1, 2], weights=[0.25, 0.5, 0.25])[0]):
         new_request(state)
 
     active = [r for r in state["items"] if r["stage"] not in DONE]
@@ -304,15 +304,17 @@ def ai_extract(kind, text):
     client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
     prompt = ("You are a procurement assistant. Extract one row per document below. "
               "Calculate totals as quantity x unit price and convert weeks to days (1 week = 7 days).\n\n" + text)
+    last_error = None
     for attempt in range(3):
         try:
             response = client.models.generate_content(
                 model="gemini-flash-lite-latest", contents=prompt,
                 config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=schema))
             return pd.DataFrame(json.loads(response.text))
-        except Exception:
+        except Exception as error:
+            last_error = error
             time.sleep(4)
-    return None
+    raise RuntimeError(str(last_error))  # errors are not cached, so the next click tries again
 
 
 # ---------- Page ----------
@@ -325,7 +327,7 @@ st.warning("Demo project: all departments, suppliers, requests and invoices are 
 if "items" not in st.session_state:
     reset(st.session_state)
 
-SPEEDS = {"Slow": 1, "Normal": 2, "Fast": 4}
+SPEEDS = {"Slow": 2.5, "Normal": 1.5, "Fast": 0.7}  # seconds between workflow steps
 
 
 def card(title, value, color):
@@ -352,8 +354,7 @@ def item_card(r):
 def live_view():
     state = st.session_state
     if state.get("live_on"):
-        for _ in range(SPEEDS[state.get("live_speed", "Normal")]):
-            step(state)
+        step(state)
     s = state["stats"]
 
     st.markdown(f"#### 🕘 {state['clock']:%A %d %b · %H:%M}")
@@ -361,9 +362,9 @@ def live_view():
              ("Auto-approved", f"{s['auto_approved']:,}", "#2ecc71"),
              ("⏰ Reminders sent", f"{s['reminders']:,}", "#f5b041"),
              ("🚩 Budget exceptions", f"{s['budget_exceptions']:,}", "#eb4034"),
-             ("POs created", f"{s['pos']:,} · AED {s['po_value'] / 1000:,.0f}k", "#e1e8f5"),
+             (f"POs · AED {s['po_value'] / 1e6:,.1f}M", f"{s['pos']:,}", "#e1e8f5"),
              ("🚩 Invoices blocked", f"{s['flagged']:,}", "#eb4034"),
-             ("💰 Overpayment stopped", f"AED {s['saved']:,.0f}", "#2ecc71")]
+             ("💰 Money saved", f"AED {s['saved']:,.0f}", "#2ecc71")]
     for col, (title, value, color) in zip(st.columns(7), cards):
         col.markdown(card(title, value, color), unsafe_allow_html=True)
 
@@ -406,7 +407,8 @@ with tab_live:
     c2.select_slider("Speed", options=list(SPEEDS), value="Normal", key="live_speed")
     if c3.button("🔄 Reset"):
         reset(st.session_state)
-    st.fragment(run_every=1.5 if st.session_state.get("live_on") else None)(live_view)()
+    run_every = SPEEDS[st.session_state.get("live_speed", "Normal")] if st.session_state.get("live_on") else None
+    st.fragment(run_every=run_every)(live_view)()
 
 with tab_ai:
     st.markdown("The workflow starts from **messy documents**. Here Gemini reads them and turns them into clean "
@@ -421,11 +423,14 @@ with tab_ai:
     doc_col.code(text, language=None, wrap_lines=True)
     result_col.markdown("**What the AI extracted**")
     if result_col.button("🤖 Read with AI", type="primary"):
-        with st.spinner("Gemini is reading the documents..."):
-            result = ai_extract(key, text)
-        if result is None:
-            result_col.error("The AI service is busy right now. Please try again in a minute.")
-        else:
+        try:
+            with st.spinner("Gemini is reading the documents..."):
+                result = ai_extract(key, text)
+        except Exception as error:
+            result = None
+            result_col.error("The AI service could not read the documents. Please try again in a minute.")
+            result_col.caption(f"Details: {str(error)[:300]}")
+        if result is not None:
             result_col.dataframe(result, hide_index=True)
             result_col.success(f"{len(result)} documents turned into structured data.")
 
